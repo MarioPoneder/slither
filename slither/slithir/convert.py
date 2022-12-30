@@ -15,6 +15,7 @@ from slither.core.declarations import (
 )
 from slither.core.declarations.custom_error import CustomError
 from slither.core.declarations.function_contract import FunctionContract
+from slither.core.declarations.function_top_level import FunctionTopLevel
 from slither.core.declarations.solidity_import_placeholder import SolidityImportPlaceHolder
 from slither.core.declarations.solidity_variables import SolidityCustomRevert
 from slither.core.expressions import Identifier, Literal
@@ -497,7 +498,9 @@ def propagate_types(ir, node: "Node"):  # pylint: disable=too-many-locals
     # propagate the type
     node_function = node.function
     using_for = (
-        node_function.contract.using_for if isinstance(node_function, FunctionContract) else {}
+        node_function.contract.using_for_complete
+        if isinstance(node_function, FunctionContract)
+        else {}
     )
     if isinstance(ir, OperationWithLValue):
         # Force assignment in case of missing previous correct type
@@ -524,9 +527,9 @@ def propagate_types(ir, node: "Node"):  # pylint: disable=too-many-locals
                     if can_be_solidity_func(ir):
                         return convert_to_solidity_func(ir)
 
-                # convert library
+                # convert library or top level function
                 if t in using_for or "*" in using_for:
-                    new_ir = convert_to_library(ir, node, using_for)
+                    new_ir = convert_to_library_or_top_level(ir, node, using_for)
                     if new_ir:
                         return new_ir
 
@@ -875,7 +878,9 @@ def extract_tmp_call(ins: TmpCall, contract: Optional[Contract]):  # pylint: dis
             # }
             node_func = ins.node.function
             using_for = (
-                node_func.contract.using_for if isinstance(node_func, FunctionContract) else {}
+                node_func.contract.using_for_complete
+                if isinstance(node_func, FunctionContract)
+                else {}
             )
 
             targeted_libraries = (
@@ -888,10 +893,14 @@ def extract_tmp_call(ins: TmpCall, contract: Optional[Contract]):  # pylint: dis
                     lib_contract_type.type, Contract
                 ):
                     continue
-                lib_contract = lib_contract_type.type
-                for lib_func in lib_contract.functions:
-                    if lib_func.name == ins.ori.variable_right:
-                        candidates.append(lib_func)
+                if isinstance(lib_contract_type, FunctionContract):
+                    # Using for with list of functions, this is the function called
+                    candidates.append(lib_contract_type)
+                else:
+                    lib_contract = lib_contract_type.type
+                    for lib_func in lib_contract.functions:
+                        if lib_func.name == ins.ori.variable_right:
+                            candidates.append(lib_func)
 
             if len(candidates) == 1:
                 lib_func = candidates[0]
@@ -1320,9 +1329,28 @@ def convert_to_pop(ir, node):
     return ret
 
 
-def look_for_library(contract, ir, using_for, t):
+def look_for_library_or_top_level(contract, ir, using_for, t):
     for destination in using_for[t]:
-        lib_contract = contract.file_scope.get_contract_from_name(str(destination))
+        if isinstance(destination, FunctionTopLevel) and destination.name == ir.function_name:
+            internalcall = InternalCall(destination, ir.nbr_arguments, ir.lvalue, ir.type_call)
+            internalcall.set_expression(ir.expression)
+            internalcall.set_node(ir.node)
+            internalcall.call_gas = ir.call_gas
+            internalcall.arguments = [ir.destination] + ir.arguments
+            return_type = internalcall.function.return_type
+            if return_type:
+                if len(return_type) == 1:
+                    internalcall.lvalue.set_type(return_type[0])
+                elif len(return_type) > 1:
+                    internalcall.lvalue.set_type(return_type)
+            else:
+                internalcall.lvalue = None
+            return internalcall
+
+        if isinstance(destination, FunctionContract) and destination.contract.is_library:
+            lib_contract = destination.contract
+        else:
+            lib_contract = contract.file_scope.get_contract_from_name(str(destination))
         if lib_contract:
             lib_call = LibraryCall(
                 lib_contract,
@@ -1342,19 +1370,19 @@ def look_for_library(contract, ir, using_for, t):
     return None
 
 
-def convert_to_library(ir, node, using_for):
+def convert_to_library_or_top_level(ir, node, using_for):
     # We use contract_declarer, because Solidity resolve the library
     # before resolving the inheritance.
     # Though we could use .contract as libraries cannot be shadowed
     contract = node.function.contract_declarer
     t = ir.destination.type
     if t in using_for:
-        new_ir = look_for_library(contract, ir, using_for, t)
+        new_ir = look_for_library_or_top_level(contract, ir, using_for, t)
         if new_ir:
             return new_ir
 
     if "*" in using_for:
-        new_ir = look_for_library(contract, ir, using_for, "*")
+        new_ir = look_for_library_or_top_level(contract, ir, using_for, "*")
         if new_ir:
             return new_ir
 
