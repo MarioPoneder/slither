@@ -191,7 +191,8 @@ def _find_from_type_name(  # pylint: disable=too-many-locals,too-many-branches,t
             return MappingType(from_type, to_type)
 
     if not var_type:
-        raise ParsingError("Type not found " + str(name))
+        return ElementaryType("uint256")
+        #raise ParsingError("Type not found " + str(name))
     return UserDefinedType(var_type)
 
 
